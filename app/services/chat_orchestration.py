@@ -214,7 +214,7 @@ def query_to_db_recent_messages(db: Session, chat_user: chat_user, query: str, r
 
     message = add_message(db, user_id, chat_id, role = "user", content = query)
 
-    _add_query_to_recent_messages(message, retrieved_memories, recent_messages)
+    return _add_query_to_recent_messages(message, retrieved_memories, recent_messages)
 
 def llm_response_to_db_recent_messages(db: Session, chat_user: chat_user, response: str, recent_messages: list[recent_messages]):
     chat_id = chat_user.chat_id
@@ -232,10 +232,13 @@ def _summarisation_ingestion_check(recent_messages: list[recent_messages]):
 
 def send_for_summarisation(chat_user: chat_user, recent_messages: list[recent_messages], limit: int):
     chat = get_chat(db, chat_user.user_id, chat_user.chat_id)
-    batch_for_summarisation = [message for item.message in recent_messages if message.order_in_chat <= chat.last_summary_message_order]
-    batch_for_summarisation = batch_for_summarisation[:limit]
+    batch_for_summarisation = recent_messages[:limit]
 
     block_summariser(db, batch_for_summarisation, chat_user)
+
+    recent_messages = recent_messages[limit:]
+
+    return recent_messages
 
 
 def send_for_ingestion(chat_user: chat_user, recent_messages: list[recent_messages], limit: int):
@@ -251,10 +254,20 @@ def chat():
 
     while(True):
         query = input("Enter your message:")
-
         retrieved_memories = semantic_retrieval(db, chat_user, summary_block, recent_messages)
+        llm_response = llm_call(summary_block, recent_messages, query, retrieved_memories)
+        print("LLM Response: ", llm_response)
 
-        llm_output = llm_call(summary_block, recent_messages, query, retrieved_memories)
+        recent_messages = query_to_db_recent_messages(db, chat_user, query, retrieved_memories, recent_messages)
+        recent_messages = llm_response_to_db_recent_messages(db, chat_user, llm_response, recent_messages)
+        query = ""
+        llm_response = ""
+
+        if _summarisation_ingestion_check(chat_user, recent_messages, limit = 30):
+            recent_messages = send_for_summarisation(chat_user, recent_messages, limit = 15)
+            send_for_ingestion(chat_user, recent_messages, limit = 15)
+
+
 
         
 

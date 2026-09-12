@@ -111,6 +111,9 @@ def classification_retrieved_needed(retrieved: list[retrieved_memory], conversat
 
     return retrieved_needed
 
+def update_retrieved_summary_detail_db(retrieved: list[retrieved_memory], message: Messages):
+    
+
 def _recreate_recent_messages(recent_messages: list[recent_messages], retrieved_needed: list[retrieved_memory]):
 
     retrieved_summary_ids = {

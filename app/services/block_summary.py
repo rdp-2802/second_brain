@@ -246,4 +246,4 @@ def block_summariser(db: Session, messages: list["Messages"], chat_user: chat_us
     for message in messages:
         add_message_join_block(db, chat_id, block.id, message.id)
 
-    return block
+    return block, recent_messages
