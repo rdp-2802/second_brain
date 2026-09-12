@@ -54,6 +54,7 @@ class User(Base):
 
     chat: Mapped[List["Chat"]] = relationship(back_populates="user")
     message: Mapped[List["Message"]] = relationship(back_populates="user")
+    message_block: Mapped[List["MessageBlock"]] = relationship(back_populates="user")
     memory_detail: Mapped[List["MemoryDetail"]] = relationship(back_populates="user")
     memory_summary: Mapped[List["MemorySummary"]] = relationship(back_populates="user")
     retrieved_summary: Mapped[List["RetrievedSummary"]] = relationship(back_populates="user")
@@ -102,11 +103,13 @@ class MessageBlock(Base):
     __tablename__ = "message_block"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id"))
     chat_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chat.id"))
     order_in_chat: Mapped[int] = mapped_column(Integer)
-    summary_text: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     
+    user: Mapped["User"] = relationship(back_populates="message_block")
     chat: Mapped["Chat"] = relationship(back_populates="message_block")
     message_link: Mapped[List["MessageJoinBlock"]] = relationship(back_populates="block")
     message: Mapped[List["Message"]] = relationship(secondary="message_join_block", viewonly=True)
