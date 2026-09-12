@@ -1,13 +1,30 @@
 # Python-generated files
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+
+# Build / packaging
 build/
 dist/
+*.egg-info/
 wheels/
-*.egg-info
 
 # Virtual environments
-.venv
+.venv/
+venv/
+env/
 
-# Dot env
+# Environment variables / secrets
 .env
+.env.*
+
+# IDE / editor files
+.vscode/
+.idea/
+
+# OS-generated files
+.DS_Store
+
+# Local model files
+ModernBert/
+models.context_classifier/
