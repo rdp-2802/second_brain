@@ -268,16 +268,7 @@ def chat():
             send_for_ingestion(chat_user, recent_messages, limit = 15)
 
 
-
-        
-
-    # context formed 
-    # user input taken 
-    # llm output called 
-    # query added to recent messages
-    # llm output converted to message and then added to recent messages
-    # check if recent message window is too big now for summarisation and memory extraction to happen
-    # send for summarisation
-    # send for ingestion
-    # make new chat context
-    # loop
+# the whole thing will not run in a loop, instead a context will be formed after every user query
+# so there should be 1 single pipeline maintaining the whole chat orchestration till we get all the functions implemented 
+# query comes 
+# we form chat context
