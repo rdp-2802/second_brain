@@ -60,7 +60,17 @@ def delete_chat(db: Session, user_id: UUID, chat_id: UUID):
 
     return chat
 
-def update_chat(db: Session, user_id: UUID, chat_id: UUID, title: str | None = None, last_message_time: datetime | None = None, last_summarisation_message_order: int| None = None, last_ingestion_message_order: int | None = None):
+def update_chat(
+    db: Session,
+    user_id: UUID,
+    chat_id: UUID,
+    title: str | None = None,
+    last_message_time: datetime | None = None,
+    last_summarisation_message_order: int | None = None,
+    last_ingestion_message_order: int | None = None,
+    summarisation_going_on: bool | None = None,
+    ingestion_going_on: bool | None = None,
+):
 
     user = read_user(db, user_id)
 
@@ -68,21 +78,27 @@ def update_chat(db: Session, user_id: UUID, chat_id: UUID, title: str | None = N
         return None
 
     chat = read_chat(db, user_id, chat_id)
-    
-    if chat is None: 
+
+    if chat is None:
       return None
-    
-    if last_message_time != None:
+
+    if last_message_time is not None:
         chat.last_message_at = last_message_time
 
-    if title != None:
+    if title is not None:
         chat.title = title
-    
-    if last_ingestion_message_order != None:
+
+    if last_ingestion_message_order is not None:
         chat.last_ingestion_message_order = last_ingestion_message_order
 
-    if last_summarisation_message_order != None:
+    if last_summarisation_message_order is not None:
         chat.last_summarisation_message_order = last_summarisation_message_order
+
+    if summarisation_going_on is not None:
+        chat.summarisation_going_on = summarisation_going_on
+
+    if ingestion_going_on is not None:
+        chat.ingestion_going_on = ingestion_going_on
 
     db.commit()
     db.refresh(chat)

@@ -6,6 +6,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     create_engine,
     DateTime,
     Enum as SQLEnum,
@@ -70,6 +71,8 @@ class Chat(Base):
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_summarisation_message_order: Mapped[int] = mapped_column(Integer, default = 0)
     last_ingestion_message_order: Mapped[int] = mapped_column(Integer, default = 0)
+    summarisation_going_on: Mapped[bool] = mapped_column(Boolean, default = False, nullable = False)
+    ingestion_going_on: Mapped[bool] = mapped_column(Boolean, default = False, nullable = False)
 
     user: Mapped["User"] = relationship(back_populates="chat")
     message: Mapped[List["Message"]] = relationship(back_populates="chat")

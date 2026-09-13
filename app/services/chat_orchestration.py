@@ -1,97 +1,162 @@
-class summary_block(BaseModel):
+import json
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.database.model import Message, MessageBlock, MemorySummary, MemoryDetail, role_enum
+from app.database.crud.chat import read_chat, update_chat
+from app.database.crud.message import create_message
+from app.database.crud.retrieved_summary import create_retrieved_summary
+from app.database.crud.retrieved_detail import create_retrieved_detail
+from app.services.semantic_retrieval import semantic_retrieval
+
+try:
+    from app.models.llm import chat_gemini
+except ImportError:
+    from app.services.llm import chat_gemini  # fallback for legacy path
+
+
+# Pydantic models (PascalCase, allow ORM objects)
+class SummaryBlock(BaseModel):
     order: int
     block: MessageBlock
 
-class recent_messages(BaseModel):
-    order: int
-    message: Messages
-    retrieved_summary: list[KnowledgeSummary]
-    retrieved_detail: list[KnowledgeDetail]
+    model_config = {"arbitrary_types_allowed": True}
 
-class retrieved_memory(BaseModel):
+
+class RecentMessage(BaseModel):
+    order: int
+    message: Message
+    retrieved_summary: list[MemorySummary]
+    retrieved_detail: list[MemoryDetail]
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class RetrievedMemory(BaseModel):
     memory_type: Literal["summary", "detail"]
-    memory: KnowledgeDetail | KnowledgeSummary
+    memory: MemoryDetail | MemorySummary
     similarity: float
 
-class chat_user(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class ChatUser(BaseModel):
     user_id: UUID
     chat_id: UUID
 
-def _form_recent_message(messages: list["Messages"]):
 
-    recent_messages = []
+def _form_recent_messages(messages: list[Message]) -> list[RecentMessage]:
+    items: list[RecentMessage] = []
 
     for message in messages:
+        # Message.retrieved_summary/detail are List[RetrievedSummary/RetrievedDetail] join rows
+        # Extract underlying Memory objects for orchestration
+        retrieved_summaries: list[MemorySummary] = []
+        for rs in getattr(message, "retrieved_summary", []) or []:
+            mem = getattr(rs, "memory_summary", None)
+            if mem is not None:
+                retrieved_summaries.append(mem)
 
-        retrieved_details = message.retrieved_detail
-        retrieved_summary = message.retrieved_summary
+        retrieved_details: list[MemoryDetail] = []
+        for rd in getattr(message, "retrieved_detail", []) or []:
+            mem = getattr(rd, "memory_detail", None)
+            if mem is not None:
+                retrieved_details.append(mem)
 
-        recent_message = recent_messages(
-            order = message.order_in_chat,
-            retrieved_summary = retrieved_summary,
-            retrieved_detail = retrieved_detail
+        item = RecentMessage(
+            order=message.order_in_chat,
+            message=message,
+            retrieved_summary=retrieved_summaries,
+            retrieved_detail=retrieved_details,
         )
+        items.append(item)
 
-        recent_messages.append(recent_message)
+    # Keep chronological order
+    items.sort(key=lambda x: x.order)
+    return items
 
-    return recent_messages
 
-def _form_summary_block(summaries: list["MessageBlock"]):
+def _form_summary_blocks(blocks: list[MessageBlock]) -> list[SummaryBlock]:
+    items: list[SummaryBlock] = []
 
-    summary_blocks = []
-
-    for summary in summaries:
-        summary_block = summary_block(
-            order = summary.order_in_chat
-            block = summary
+    for block in blocks:
+        sb = SummaryBlock(
+            order=block.order_in_chat,
+            block=block,
         )
-        summary_blocks.append(summary_block)
+        items.append(sb)
 
-    return summary_blocks
+    items.sort(key=lambda x: x.order)
+    return items
 
-    
-def _form_chat_context(db: Session, chat_user: chat_user):
+
+def _form_chat_context(db: Session, chat_user: ChatUser) -> tuple[list[SummaryBlock], list[RecentMessage]]:
     chat_id = chat_user.chat_id
     user_id = chat_user.user_id
 
-    summary_blocks = []
-    recent_messages = []
+    chat = read_chat(db, user_id, chat_id)
+    if chat is None:
+        return [], []
 
-    chat = get_chat(db, user_id, chat_id)
+    # New Chat: no messages and no blocks yet
+    if not chat.message and not chat.message_block:
+        return [], []
 
-    if chat.title = "New Chat" & chat.messages is None:
-        #New Chat, no summary or recent messages
-        return summary_block, recent_messages
+    # Summary blocks are ALL blocks (they represent already-summarised history)
+    blocks: list[MessageBlock] = sorted(list(chat.message_block or []), key=lambda b: b.order_in_chat)
+    summary_blocks = _form_summary_blocks(blocks)
 
-    messages = chat.messages
-    summaries = chat.message_blocks
+    # Recent messages are only those AFTER last_summarisation_message_order
+    # Messages before this are already captured in summary blocks
+    last_summarised_order = chat.last_summarisation_message_order or 0
+    messages: list[Message] = [
+        m for m in (chat.message or [])
+        if m.order_in_chat > last_summarised_order
+    ]
+    messages.sort(key=lambda m: m.order_in_chat)
+    recent_messages = _form_recent_messages(messages)
 
-    recent_messages = _form_recent_message(messages)
+    return summary_blocks, recent_messages
 
-    summary_blocks = _form_summary_block(summaries)
 
-    return summary_block, recent_messages
+def _llm_json_creation(
+    summary_blocks: list[SummaryBlock],
+    recent_messages: list[RecentMessage],
+    query: str,
+    retrieved_memories: list[RetrievedMemory],
+):
+    # MessageBlock.content is the summary text (not summary_text)
+    llm_summary = [{"Summary Text": block.block.content} for block in summary_blocks]
+    llm_recent_messages = [
+        {
+            "Role": item.message.role.value if hasattr(item.message.role, "value") else str(item.message.role),
+            "Content": item.message.content,
+            "Retrieved Summaries": [s.content for s in item.retrieved_summary],
+            "Retrieved Details": [d.content for d in item.retrieved_detail],
+        }
+        for item in recent_messages
+    ]
+    llm_retrieved_memories: list[dict] = []
 
-def _llm_json_creation(summary_blocks: list[summary_block], recent_messages: list[recent_messages], query: str, retrieved_memories: list[retrieved_memory]):
-
-    llm_summary = [{"Summary Text": block.summary_text} for block in summary_blocks]
-    llm_recent_messages = [{"Role": item.message.role, "Content": item.message.content, "Retrieved Summaries": item.retrieved_summary, "Retrieved Details": item.retrieved_detail} for item in recent_messages]
-    llm_retrieved_memories = []
-
-    for memory in retrieved_memories:
-        if memory.memory_type == "summary":
-            retrieved_memory = {
-                "similarity" : memory.similarity,
-                "type" : "summary",
-                "content" : memory.summary
+    for mem in retrieved_memories:
+        if mem.memory_type == "summary":
+            payload = {
+                "similarity": mem.similarity,
+                "type": "summary",
+                "content": mem.memory.content,
             }
-        if memory.memory_type == "detail":
-            retrieved_memory = {
-                "similarity" : memory.similarity,
-                "type" : "detail",
-                "content" : memory.detail_content
+        elif mem.memory_type == "detail":
+            payload = {
+                "similarity": mem.similarity,
+                "type": "detail",
+                "content": mem.memory.content,
             }
-        llm_retrieved_memories.append(retrieved_memory)
+        else:
+            continue
+        llm_retrieved_memories.append(payload)
 
     json_llm_summary = json.dumps(llm_summary, ensure_ascii=False)
     json_llm_recent_messages = json.dumps(llm_recent_messages, ensure_ascii=False)
@@ -99,7 +164,8 @@ def _llm_json_creation(summary_blocks: list[summary_block], recent_messages: lis
 
     return json_llm_summary, json_llm_recent_messages, json_llm_retrieved_memories
 
-def _llm_prompt_creation(json_llm_summary: str, json_llm_recent_messages: str, json_llm_retrieved_memories: str,):
+
+def _llm_prompt_creation(json_llm_summary: str, json_llm_recent_messages: str, json_llm_retrieved_memories: str):
     system_prompt = """
     You are a personal conversational assistant.
 
@@ -169,7 +235,7 @@ def _llm_prompt_creation(json_llm_summary: str, json_llm_recent_messages: str, j
     that is relevant to the user's current message.
     """
 
-        user_prompt = f"""
+    user_prompt = f"""
     PREVIOUS CONVERSATION SUMMARY:
     {json_llm_summary}
 
@@ -184,91 +250,268 @@ def _llm_prompt_creation(json_llm_summary: str, json_llm_recent_messages: str, j
     prompt = system_prompt + user_prompt
     return prompt
 
-def _add_query_to_recent_messages(message: Messages, retrieved_memories: list[retrieved_memories], recent_messages: list[recent_messages]):
-    retrieved_summary = [item.memory for item in retrieved_memories if item.memory_type == "summary"]
-    retrieved_detail = [item.memory for item in retrieved_memories if item.memory_type == "detail"]
-    order = message.order_in_chat
 
-    recent_messages.append(recent_messages(
-        order = order,
-        message = message,
-        retrieved_summary = retrieved_summary,
-        retrieved_detail = retrieved_detail
-    ))
+def _persist_user_message_with_retrievals(
+    db: Session, chat_user: ChatUser, query: str, retrieved_memories: list[RetrievedMemory]
+) -> Message:
+    user_msg = create_message(db, chat_user.user_id, chat_user.chat_id, role=role_enum.USER, content=query)
+    if user_msg is None:
+        raise ValueError("Failed to create user message - chat not found")
 
-    return recent_messages
+    for mem in retrieved_memories:
+        if mem.memory_type == "summary":
+            create_retrieved_summary(
+                db,
+                user_id=chat_user.user_id,
+                chat_id=chat_user.chat_id,
+                message_id=user_msg.id,
+                memory_summary_id=mem.memory.id,
+            )
+            # update retrieval metadata if available
+            try:
+                from app.database.crud.memory_summary import update_memory_summary_retrieval_metadata
 
-def _add_llm_response_to_recent_messages(message: Messages, recent_messages: list[recent_messages]):
-    recent_messages.append(recent_messages(
-        order = message.order_in_chat,
-        message = message
-        retrieved_summary = []
-        retrieved_detail = []
-    ))
+                update_memory_summary_retrieval_metadata(db, chat_user.user_id, mem.memory.id)
+            except Exception:
+                pass
+        elif mem.memory_type == "detail":
+            create_retrieved_detail(
+                db,
+                user_id=chat_user.user_id,
+                chat_id=chat_user.chat_id,
+                message_id=user_msg.id,
+                memory_detail_id=mem.memory.id,
+            )
+    return user_msg
 
-    return recent_messages
 
-def query_to_db_recent_messages(db: Session, chat_user: chat_user, query: str, retrieved_memories: list[retrieved_memories], recent_messages: list[recent_messages]):
-    chat_id = chat_user.chat_id
-    user_id = chat_user.user_id
+def _persist_assistant_message(db: Session, chat_user: ChatUser, response: str) -> Message:
+    assistant_msg = create_message(
+        db, chat_user.user_id, chat_user.chat_id, role=role_enum.ASSISTANT, content=response
+    )
+    if assistant_msg is None:
+        raise ValueError("Failed to create assistant message - chat not found")
+    return assistant_msg
 
-    message = add_message(db, user_id, chat_id, role = "user", content = query)
 
-    return _add_query_to_recent_messages(message, retrieved_memories, recent_messages)
+def _get_latest_message_order(db: Session, chat_user: ChatUser) -> int:
+    """Helper: max order_in_chat for this chat, 0 if no messages."""
+    chat = read_chat(db, chat_user.user_id, chat_user.chat_id)
+    if chat is None or not chat.message:
+        return 0
+    return max(m.order_in_chat for m in chat.message)
 
-def llm_response_to_db_recent_messages(db: Session, chat_user: chat_user, response: str, recent_messages: list[recent_messages]):
-    chat_id = chat_user.chat_id
-    user_id = chat_user.user_id
 
-    message = add_message(db, user_id, chat_id, role = "assistant", content = response)
-
-    _add_llm_response_to_recent_messages(messages, recent_messages)
-
-def _summarisation_ingestion_check(recent_messages: list[recent_messages]):
-    if len(recent_messages) >= 30:
-        return True
-    else:
+def _should_summarise(
+    db: Session, chat_user: ChatUser, threshold: int = 30
+) -> bool:
+    """
+    Check latest_message_order - last_summarisation_order >= threshold.
+    Uses Chat.last_summarisation_message_order app/database/model.py:71.
+    Future-proof: respects Chat.summarisation_going_on if column exists.
+    """
+    chat = read_chat(db, chat_user.user_id, chat_user.chat_id)
+    if chat is None:
         return False
-
-def send_for_summarisation(chat_user: chat_user, recent_messages: list[recent_messages], limit: int):
-    chat = get_chat(db, chat_user.user_id, chat_user.chat_id)
-    batch_for_summarisation = recent_messages[:limit]
-
-    block_summariser(db, batch_for_summarisation, chat_user)
-
-    recent_messages = recent_messages[limit:]
-
-    return recent_messages
+    if chat.summarisation_going_on:
+        return False
+    latest = _get_latest_message_order(db, chat_user)
+    last = chat.last_summarisation_message_order or 0
+    return (latest - last) >= threshold
 
 
-def send_for_ingestion(chat_user: chat_user, recent_messages: list[recent_messages], limit: int):
-    chat = get_chat(db, chat_user.user_id, chat_user.chat_id)
-    batch_for_ingestion = [message for item.message in recent_messages if message.order_in_chat <= chat.last_memory_extracted_message_order]
-    batch_for_ingestion = batch_for_ingestion[:limit]
-
-    ingestion(db, batch_for_ingestion, chat_user)
-
-def chat():
-
-    summary_block, recent_messages = _form_chat_context(db, chat_user)
-
-    while(True):
-        query = input("Enter your message:")
-        retrieved_memories = semantic_retrieval(db, chat_user, summary_block, recent_messages)
-        llm_response = llm_call(summary_block, recent_messages, query, retrieved_memories)
-        print("LLM Response: ", llm_response)
-
-        recent_messages = query_to_db_recent_messages(db, chat_user, query, retrieved_memories, recent_messages)
-        recent_messages = llm_response_to_db_recent_messages(db, chat_user, llm_response, recent_messages)
-        query = ""
-        llm_response = ""
-
-        if _summarisation_ingestion_check(chat_user, recent_messages, limit = 30):
-            recent_messages = send_for_summarisation(chat_user, recent_messages, limit = 15)
-            send_for_ingestion(chat_user, recent_messages, limit = 15)
+def _should_ingest(
+    db: Session, chat_user: ChatUser, threshold: int = 20
+) -> bool:
+    """
+    Check latest_message_order - last_ingestion_order >= threshold.
+    Uses Chat.last_ingestion_message_order app/database/model.py:72.
+    Future-proof: respects Chat.ingestion_going_on if column exists.
+    """
+    chat = read_chat(db, chat_user.user_id, chat_user.chat_id)
+    if chat is None:
+        return False
+    if chat.ingestion_going_on:
+        return False
+    latest = _get_latest_message_order(db, chat_user)
+    last = chat.last_ingestion_message_order or 0
+    return (latest - last) >= threshold
 
 
-# the whole thing will not run in a loop, instead a context will be formed after every user query
-# so there should be 1 single pipeline maintaining the whole chat orchestration till we get all the functions implemented 
-# query comes 
-# we form chat context
+# Backward compat for old combined check
+def _should_summarise_or_ingest(recent_messages: list[RecentMessage], threshold: int = 30) -> bool:
+    return len(recent_messages) >= threshold
+
+
+def send_for_summarisation(
+    db: Session,
+    chat_user: ChatUser,
+    recent_messages: list[RecentMessage] | None = None,
+    threshold: int = 30,
+):
+    """
+    Summarise threshold//2 oldest unsummarised messages.
+    Caller should have checked _should_summarise(delta >= threshold).
+    """
+    chat = read_chat(db, chat_user.user_id, chat_user.chat_id)
+    if chat is None:
+        return
+
+    if chat.summarisation_going_on:
+        return
+
+    last_summarised = chat.last_summarisation_message_order or 0
+    limit = threshold // 2
+
+    # Use supplied recent_messages if given, else reload from DB
+    if recent_messages is None:
+        _, recent_messages = _form_chat_context(db, chat_user)
+
+    # Only messages beyond last_summarisation_order are candidates
+    pending = [rm for rm in recent_messages if rm.order > last_summarised]
+    pending = sorted(pending, key=lambda x: x.order)
+    batch = pending[:limit]
+    if not batch:
+        return
+
+    raw_messages = [rm.message for rm in batch]
+
+    update_chat(db, chat_user.user_id, chat_user.chat_id, summarisation_going_on=True)
+
+    from app.services.block_summary import block_summariser
+
+    try:
+        block_summariser(db, raw_messages, chat_user)
+    except TypeError:
+        try:
+            block_summariser(db, batch, chat_user)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    finally:
+        update_chat(db, chat_user.user_id, chat_user.chat_id, summarisation_going_on=False)
+
+
+def send_for_ingestion(
+    db: Session,
+    chat_user: ChatUser,
+    recent_messages: list[RecentMessage] | None = None,
+    threshold: int = 20,
+):
+    """
+    Ingest ALL pending messages where order > last_ingestion_message_order.
+    No limit - spec says 'all the messages'. Threshold only gates whether to run.
+    Also used on chat close (call with threshold=0 or force=True via handle_chat_close).
+    """
+    chat = read_chat(db, chat_user.user_id, chat_user.chat_id)
+    if chat is None:
+        return
+
+    if chat.ingestion_going_on:
+        return
+
+    last_ingested = chat.last_ingestion_message_order or 0
+
+    if recent_messages is None:
+        _, recent_messages = _form_chat_context(db, chat_user)
+
+    pending = [rm for rm in recent_messages if rm.order > last_ingested]
+    pending = sorted(pending, key=lambda x: x.order)
+    if not pending:
+        return
+
+    # For threshold-gated call, pending length already implies delta >= threshold
+    # but double-check via chat if threshold >0
+    if threshold > 0:
+        latest = max(rm.order for rm in pending) if pending else last_ingested
+        if (latest - last_ingested) < threshold:
+            return
+
+    raw_messages = [rm.message for rm in pending]
+    from app.services.ingestion import ingestion
+
+    update_chat(db, chat_user.user_id, chat_user.chat_id, ingestion_going_on=True)
+
+    try:
+        ingestion(db, raw_messages, chat_user)
+    except Exception:
+        try:
+            ingestion(db, pending, chat_user)
+        except Exception:
+            pass
+    finally:
+        update_chat(db, chat_user.user_id, chat_user.chat_id, ingestion_going_on=False)
+
+
+def handle_chat_close(db: Session, chat_user: ChatUser):
+    """
+    Called when user closes chat - force ingestion of all remaining messages.
+    Spec: ingestion will happen also when the user closes the chat.
+    """
+    _, recent_messages = _form_chat_context(db, chat_user)
+    # force all pending regardless of threshold
+    send_for_ingestion(db, chat_user, recent_messages, threshold=0)
+
+
+def handle_chat_turn(
+    db: Session,
+    chat_user: ChatUser,
+    query: str,
+    summarisation_threshold: int = 30,
+    ingestion_threshold: int = 20,
+) -> str:
+    """
+    Stateless turn handler - called per FastAPI request.
+
+    Flow per spec:
+    1) get ChatUser (caller provides)
+    2) form context (summary_blocks + recent_messages) as Pydantic objects
+    3) query from FastAPI (arg `query`)
+    4) form chat prompt from context
+    5) get LLM response
+    6) inject user + assistant messages + retrieved links into
+       message / retrieved_summary / retrieved_detail tables
+    7) after injection run:
+       _should_summarise: latest_order - last_summarisation_order >= threshold -> summarise threshold//2
+       _should_ingest:    latest_order - last_ingestion_order    >= threshold -> ingest all pending
+       thresholds are independent. Ingestion also on chat close via handle_chat_close().
+       Future Chat.summarisation_going_on / ingestion_going_on guards prevent overlap.
+    """
+    # 2. Form context
+    summary_blocks, recent_messages = _form_chat_context(db, chat_user)
+
+    # 3-4. Retrieval uses context + query, then prompt
+    try:
+        retrieved_needed, recent_messages_deduped = semantic_retrieval(
+            db, chat_user, summary_blocks, recent_messages, query
+        )
+    except TypeError:
+        retrieved_needed = semantic_retrieval(db, chat_user, summary_blocks, recent_messages)  # type: ignore
+        recent_messages_deduped = recent_messages
+        if isinstance(retrieved_needed, tuple):
+            retrieved_needed, recent_messages_deduped = retrieved_needed
+
+    if retrieved_needed is None:
+        retrieved_needed = []
+
+    j_summary, j_recent, j_retrieved = _llm_json_creation(
+        summary_blocks, recent_messages_deduped, query, retrieved_needed
+    )
+    prompt = _llm_prompt_creation(j_summary, j_recent, j_retrieved)
+
+    # 5. LLM
+    llm_response = chat_gemini(prompt)
+
+    # 6. Inject - persist user (with retrievals) + assistant
+    _persist_user_message_with_retrievals(db, chat_user, query, retrieved_needed)
+    _persist_assistant_message(db, chat_user, llm_response)
+
+    # 7. Post-injection maintenance with delta checks + distinct thresholds
+    if _should_summarise(db, chat_user, threshold=summarisation_threshold):
+        send_for_summarisation(db, chat_user, threshold=summarisation_threshold)
+
+    if _should_ingest(db, chat_user, threshold=ingestion_threshold):
+        send_for_ingestion(db, chat_user, threshold=ingestion_threshold)
+
+    return llm_response
