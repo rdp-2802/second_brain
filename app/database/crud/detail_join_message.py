@@ -34,6 +34,9 @@ def create_detail_join_message(
     if message is None:
         return None
 
+    if detail.chat_id is not None and detail.chat_id != message.chat_id:
+        return None
+
     join = DetailJoinMessage(
         detail_id=detail_id,
         message_id=message_id

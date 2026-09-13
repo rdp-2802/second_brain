@@ -3,14 +3,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.database.model import KnowledgeDetail
+from app.database.model import MemoryDetail
 from app.models.embedding import generate_embedding
 
-
-from app.database.crud.chat import get_chat
-from app.database.crud.knowledge_summary import (
-    get_knowledge_summary
-)
+from app.database.crud.chat import read_chat
+from app.database.crud.memory_summary import read_memory_summary
 
 
 def create_memory_detail(
@@ -164,26 +161,3 @@ def delete_memory_detail(
 
     return memory_detail
 
-#never to be used
-def update_knowledge_detail(
-    db: Session,
-    knowledge_detail_id: UUID,
-    detail_content: str | None = None,
-):
-    knowledge_detail = get_knowledge_detail(
-        db,
-        knowledge_detail_id
-    )
-
-    if knowledge_detail is None:
-        return None
-
-    if detail_content is not None:
-        knowledge_detail.detail_content = detail_content
-        knowledge_detail.embedding=generate_embedding(detail_content)
-
-
-    db.commit()
-    db.refresh(knowledge_detail)
-
-    return knowledge_detail

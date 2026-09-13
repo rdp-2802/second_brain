@@ -4,11 +4,9 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.models.embedding import generate_embedding
-from app.database.crud.user import get_user
+from app.database.crud.user import read_user
 
-from app.database.model import (
-    KnowledgeSummary,
-)
+from app.database.model import MemorySummary
 
 #relevancy score is set to be 0 right now. both while adding and updating a summary. we will develop a useful algorithm in v2 or v3 for calculating and using relevancy score
 
@@ -127,11 +125,24 @@ def update_memory_summary(
 
     return memory_summary
 
-def update_knowsum_last_retrieve_time(db: Session, id: UUID):
-    statement = select(KnowledgeSummary).where(KnowledgeSummary.id == id)
-    result = db.execute(statement).scalar_one_or_none()
-    result.last_retrieved_at = datetime.now()
-    db.commit()
-    db.refresh(result)
+def update_memory_summary_retrieval_metadata(
+    db: Session,
+    user_id: UUID,
+    memory_summary_id: UUID
+):
+    memory_summary = read_memory_summary(
+        db,
+        user_id,
+        memory_summary_id
+    )
 
-    return result
+    if memory_summary is None:
+        return None
+
+    memory_summary.retrieval_count += 1
+    memory_summary.last_retrieved_at = datetime.now()
+
+    db.commit()
+    db.refresh(memory_summary)
+
+    return memory_summary

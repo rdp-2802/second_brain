@@ -1,27 +1,59 @@
 from uuid import UUID
 
-from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.database.model import ChatRetrievedDetail
+from app.database.model import RetrievedDetail
+from app.database.crud.chat import read_chat
+from app.database.crud.message import read_message
+from app.database.crud.memory_summary import read_memory_summary
+from app.database.crud.memory_detail import read_memory_detail
 
 
-def add_chat_retrieved_detail(
+def create_retrieved_detail(
     db: Session,
     user_id: UUID,
     chat_id: UUID,
     message_id: UUID,
-    knowledge_summary_id: UUID,
-    knowledge_detail_id: UUID,
-    retrieved_summary_id: UUID | None = None
+    memory_detail_id: UUID
 ):
-    retrieved_detail = ChatRetrievedDetail(
+    chat = read_chat(
+        db,
+        user_id,
+        chat_id
+    )
+
+    if chat is None:
+        return None
+
+    message = read_message(
+        db,
+        user_id,
+        chat_id,
+        message_id
+    )
+
+    if message is None:
+        return None
+
+
+    memory_detail = read_memory_detail(
+        db,
+        user_id,
+        memory_detail_id
+    )
+
+    if memory_detail is None:
+        return None
+
+    memory_summary_id = memory_detail.summary_id
+
+    retrieved_detail = RetrievedDetail(
         user_id=user_id,
         chat_id=chat_id,
         message_id=message_id,
-        knowledge_summary_id=knowledge_summary_id,
-        knowledge_detail_id=knowledge_detail_id,
-        retrieved_summary_id=retrieved_summary_id
+        memory_summary_id=memory_summary_id,
+        memory_detail_id=memory_detail_id
     )
 
     db.add(retrieved_detail)
@@ -31,104 +63,111 @@ def add_chat_retrieved_detail(
     return retrieved_detail
 
 
-def get_chat_retrieved_detail(
+def read_retrieved_detail(
     db: Session,
+    user_id: UUID,
     retrieved_detail_id: UUID
 ):
-    statement = select(ChatRetrievedDetail).where(
-        ChatRetrievedDetail.id == retrieved_detail_id
+    statement = select(RetrievedDetail).where(
+        RetrievedDetail.id == retrieved_detail_id,
+        RetrievedDetail.user_id == user_id
     )
 
-    retrieved_detail = db.execute(statement).scalar_one_or_none()
+    retrieved_detail = db.execute(
+        statement
+    ).scalar_one_or_none()
 
     return retrieved_detail
 
 
-def get_chat_retrieved_details_by_chat(
+def read_retrieved_details_by_chat(
     db: Session,
+    user_id: UUID,
     chat_id: UUID
 ):
     statement = (
-        select(ChatRetrievedDetail)
-        .where(ChatRetrievedDetail.chat_id == chat_id)
+        select(RetrievedDetail)
+        .where(
+            RetrievedDetail.user_id == user_id,
+            RetrievedDetail.chat_id == chat_id
+        )
     )
 
-    retrieved_details = db.execute(statement).scalars().all()
+    retrieved_details = db.execute(
+        statement
+    ).scalars().all()
 
     return retrieved_details
 
 
-def get_chat_retrieved_details_by_message(
+def read_retrieved_details_by_message(
     db: Session,
+    user_id: UUID,
     message_id: UUID
 ):
     statement = (
-        select(ChatRetrievedDetail)
-        .where(ChatRetrievedDetail.message_id == message_id)
-    )
-
-    retrieved_details = db.execute(statement).scalars().all()
-
-    return retrieved_details
-
-
-def get_chat_retrieved_details_by_knowledge_summary(
-    db: Session,
-    knowledge_summary_id: UUID
-):
-    statement = (
-        select(ChatRetrievedDetail)
+        select(RetrievedDetail)
         .where(
-            ChatRetrievedDetail.knowledge_summary_id
-            == knowledge_summary_id
+            RetrievedDetail.user_id == user_id,
+            RetrievedDetail.message_id == message_id
         )
     )
 
-    retrieved_details = db.execute(statement).scalars().all()
+    retrieved_details = db.execute(
+        statement
+    ).scalars().all()
 
     return retrieved_details
 
 
-def get_chat_retrieved_details_by_knowledge_detail(
+def read_retrieved_details_by_memory_summary(
     db: Session,
-    knowledge_detail_id: UUID
+    user_id: UUID,
+    memory_summary_id: UUID
 ):
     statement = (
-        select(ChatRetrievedDetail)
+        select(RetrievedDetail)
         .where(
-            ChatRetrievedDetail.knowledge_detail_id
-            == knowledge_detail_id
+            RetrievedDetail.user_id == user_id,
+            RetrievedDetail.memory_summary_id == memory_summary_id
         )
     )
 
-    retrieved_details = db.execute(statement).scalars().all()
+    retrieved_details = db.execute(
+        statement
+    ).scalars().all()
 
     return retrieved_details
 
 
-def get_chat_retrieved_details_by_summary(
+def read_retrieved_details_by_memory_detail(
     db: Session,
-    retrieved_summary_id: UUID
+    user_id: UUID,
+    memory_detail_id: UUID
 ):
     statement = (
-        select(ChatRetrievedDetail)
+        select(RetrievedDetail)
         .where(
-            ChatRetrievedDetail.retrieved_summary_id
-            == retrieved_summary_id
+            RetrievedDetail.user_id == user_id,
+            RetrievedDetail.memory_detail_id == memory_detail_id
         )
     )
 
-    retrieved_details = db.execute(statement).scalars().all()
+    retrieved_details = db.execute(
+        statement
+    ).scalars().all()
 
     return retrieved_details
 
 
-def delete_chat_retrieved_detail(
+def delete_retrieved_detail(
     db: Session,
+    user_id: UUID,
     retrieved_detail_id: UUID
 ):
-    retrieved_detail = get_chat_retrieved_detail(
+    retrieved_detail = read_retrieved_detail(
         db,
+        user_id,
         retrieved_detail_id
     )
 

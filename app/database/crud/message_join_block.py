@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.database.model import MessageJoinBlock
 from app.database.crud.chat import read_chat
 from app.database.crud.message import read_message
+from app.database.crud.message_block import read_message_block
 
 
 def create_message_join_block(
@@ -18,6 +19,16 @@ def create_message_join_block(
     chat = read_chat(db, user_id, chat_id)
 
     if chat is None:
+        return None
+
+    block = read_message_block(db, user_id, chat_id, block_id)
+
+    if block is None:
+        return None
+
+    message = read_message(db, user_id, chat_id, message_id)
+
+    if message is None:
         return None
 
     join = MessageJoinBlock(
@@ -86,7 +97,7 @@ def read_message_join_blocks_by_message(
 ):
     message = read_message(db, user_id, chat_id, message_id)
 
-    if chat is None:
+    if message is None:
         return None
 
     statement = (
@@ -107,7 +118,7 @@ def read_message_join_block_by_block_and_message(
     block_id: UUID,
     message_id: UUID
 ):
-    block = get_message_block(db, user_id, chat_id, block_id)
+    block = read_message_block(db, user_id, chat_id, block_id)
 
     if block is None:
         return None
@@ -148,32 +159,3 @@ def delete_message_join_block(
 
     return join
 
-
-def update_message_join_block(
-    db: Session,
-    join_id: UUID,
-    chat_id: UUID | None = None,
-    block_id: UUID | None = None,
-    message_id: UUID | None = None
-):
-    join = get_message_join_block(
-        db,
-        join_id
-    )
-
-    if join is None:
-        return None
-
-    if chat_id is not None:
-        join.chat_id = chat_id
-
-    if block_id is not None:
-        join.block_id = block_id
-
-    if message_id is not None:
-        join.message_id = message_id
-
-    db.commit()
-    db.refresh(join)
-
-    return join
