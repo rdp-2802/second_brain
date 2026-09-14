@@ -3,45 +3,43 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.database.model import Messages
-from app.database.crud.message_block import (
-    get_message_blocks_by_chat,
-    add_message_block,
-    update_message_block,
-)
-from app.database.crud.message_join_block import add_message_join_block
-from app.services.llm import chat_gemini
+from app.database.model import Message, MessageBlock
+from app.database.crud.chat import read_chat, update_chat
+from app.database.crud.message import read_messages_after_order
+from app.database.crud.message_block import create_message_block, read_message_blocks_by_chat
+from app.database.crud.message_join_block import create_message_join_block
 
-def last_message_finder(messages: list["Messages"]):
-    messages.sort(key = lambda x: x.order_in_chat)
-    len = len(messages)
-    last_summary_message_order = messages[len-1].order_in_chat
+try:
+    from app.models.llm import chat_gemini
+except ImportError:
+    from app.services.llm import chat_gemini
+
 
 def _build_summary_context(
-    db: Session,
-    chat_id: UUID,
-    messages: list[Messages],
-):
-    """Fetch and shape the data needed for the block summary prompt.
-    Pure data assembly — no prompt text lives here."""
-
+    messages: list[Message],
+    blocks: list[MessageBlock],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Build prompt context from raw Message and MessageBlock objects.
+    """
     messages_and_retrieved_context = []
 
     for message in messages:
-        retrieved_summaries = [
-            retrieved_summary.knowledge_summary.summary
-            for retrieved_summary in message.retrieved_summaries
-            if retrieved_summary.knowledge_summary is not None
-        ]
+        # Extract retrieved summaries/details via join table relationships
+        retrieved_summaries = []
+        for rs in getattr(message, "retrieved_summary", []) or []:
+            mem = getattr(rs, "memory_summary", None)
+            if mem is not None:
+                retrieved_summaries.append(mem.content)
 
-        retrieved_details = [
-            retrieved_detail.knowledge_detail.detail_content
-            for retrieved_detail in message.retrieved_details
-            if retrieved_detail.knowledge_detail is not None
-        ]
+        retrieved_details = []
+        for rd in getattr(message, "retrieved_detail", []) or []:
+            mem = getattr(rd, "memory_detail", None)
+            if mem is not None:
+                retrieved_details.append(mem.content)
 
         messages_and_retrieved_context.append({
-            "role": message.role,
+            "role": message.role.value if hasattr(message.role, "value") else str(message.role),
             "content": message.content,
             "retrieved_context": {
                 "summaries": retrieved_summaries,
@@ -49,15 +47,12 @@ def _build_summary_context(
             },
         })
 
-    blocks = get_message_blocks_by_chat(db, chat_id)
-
     previous_block_summary = [
         {
             "order": block.order_in_chat,
-            "summary": block.summary_text,
+            "summary": block.content,
         }
         for block in blocks
-        if block.summary_text is not None
     ]
 
     return messages_and_retrieved_context, previous_block_summary
@@ -211,39 +206,65 @@ def _render_summary_prompt(
     return prompt_1 + prompt_2
 
 
-def block_summary_prompt(
-    db: Session,
-    chat_id: UUID,
-    user_id: UUID,
-    messages: list[Messages],
-) -> str:
-    messages_and_retrieved_context, previous_block_summary = _build_summary_context(
-        db, chat_id, messages
-    )
+def summariser(db: Session, user_id: UUID, chat_id: UUID) -> None:
+    """
+    Summarise oldest half of unsummarised messages into a MessageBlock.
+    Loads its own context from DB. Returns None (stateless).
 
-    return _render_summary_prompt(
-        user_id,
-        chat_id,
-        messages_and_retrieved_context,
-        previous_block_summary,
-    )
+    Only the oldest half is summarised so the remaining half stays as
+    recent messages for LLM context. This also avoids duplicating messages
+    in both summary blocks and recent messages.
 
-def block_summariser(db: Session, messages: list["Messages"], chat_user: chat_user)
+    1. Sanity check: chat.summarisation_going_on
+    2. Load messages after last_summarisation_message_order (ascending)
+    3. Take oldest half: batch = messages[:len(messages)//2]
+    4. Load ALL message_blocks (previous block summaries)
+    5. Build prompt, LLM call
+    6. create_message_block + create_message_join_block for batch only
+    7. update_chat -> last_summarisation_message_order = max batch order
+    """
+    # Sanity check
+    chat = read_chat(db, user_id, chat_id)
+    if chat is None:
+        return
+    if chat.summarisation_going_on:
+        return
 
-    chat_id = chat_user.chat_id
-    user_id = chat_user.user_id
+    last_summarised = chat.last_summarisation_message_order or 0
 
-    prompt = block_summary_prompt(block, messages)
+    # Load unsummarised messages (ascending by order_in_chat)
+    messages = read_messages_after_order(db, chat_id, last_summarised)
+    if not messages:
+        return
 
-    summary = chat_gemini(prompt)
+    # Only summarise oldest half — leave the rest as recent messages for context.
+    # Guarantees at least 1 message stays unsummarised for the next LLM prompt.
+    if len(messages) < 2:
+        return
+    batch = messages[: len(messages) // 2]
+    if not batch:
+        return
 
-    block = add_message_block(db, chat_id, summary)
+    # Load ALL blocks (previous block summaries for continuity)
+    blocks = read_message_blocks_by_chat(db, user_id, chat_id) or []
 
-    last_summary_message_order = last_message_finder(messages)
+    # Build prompt context from batch only
+    messages_context, blocks_context = _build_summary_context(batch, blocks)
 
-    update_chat(db, last_summary_message_order = last_summary_message_order)
+    prompt = _render_summary_prompt(user_id, chat_id, messages_context, blocks_context)
 
-    for message in messages:
-        add_message_join_block(db, chat_id, block.id, message.id)
+    # LLM call
+    summary_text = chat_gemini(prompt)
 
-    return block, recent_messages
+    # Create MessageBlock
+    block = create_message_block(db, user_id, chat_id, content=summary_text)
+    if block is None:
+        return
+
+    # Link each batched message to the block
+    for message in batch:
+        create_message_join_block(db, user_id, chat_id, block.id, message.id)
+
+    # Update last summarisation order to max of batch only
+    last_order = max(m.order_in_chat for m in batch)
+    update_chat(db, user_id, chat_id, last_summarisation_message_order=last_order)

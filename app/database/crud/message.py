@@ -100,3 +100,13 @@ def update_message(
     db.refresh(message)
 
     return message
+
+
+def read_messages_after_order(db: Session, chat_id: UUID, after_order: int) -> list[Message]:
+    """Read all messages in a chat with order_in_chat > after_order, sorted ascending."""
+    statement = (
+        select(Message)
+        .where(Message.chat_id == chat_id, Message.order_in_chat > after_order)
+        .order_by(Message.order_in_chat)
+    )
+    return list(db.execute(statement).scalars().all())

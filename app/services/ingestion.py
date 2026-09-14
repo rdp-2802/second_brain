@@ -2,56 +2,65 @@ import json
 from datetime import datetime
 from pydantic import BaseModel, TypeAdapter
 from uuid import UUID
-from app.database.model import role_enum, User, Chats, Messages
-from app.database.crud.user import get_user
-from app.database.crud.knowledge_summary import add_knowledge_summary, update_knowledge_summary
-from app.database.crud.knowledge_detail import add_knowledge_detail
+
+from app.database.model import Message, MessageBlock, role_enum
+from app.database.crud.user import read_user
+from app.database.crud.memory_summary import create_memory_summary, update_memory_summary
+from app.database.crud.memory_detail import create_memory_detail
+from app.database.crud.detail_join_message import create_detail_join_message
+from app.database.crud.chat import read_chat, update_chat
+from app.database.crud.message import read_messages_after_order
+from app.database.crud.message_block import read_message_blocks_by_chat
 from sqlalchemy.orm import Session
 from app.models.embedding import generate_embedding
-from app.services.retrieval import retrieve_memory, previous_memory
-from app.models.llm import chat_gemini
+from app.services.semantic_retrieval import retrieve_memory
 
-# UPGRADE: Give Chat Summary with recent messages for better context understanding and memory generation
+try:
+    from app.models.llm import chat_gemini
+except ImportError:
+    from app.services.llm import chat_gemini
 
-class chat_user(BaseModel):
-    user_id: UUID
-    chat_id: UUID
 
-class ingestion_message(BaseModel):
+class IngestionMessage(BaseModel):
     id: UUID
     role: role_enum
     content: str
 
-class output_detail(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class OutputDetail(BaseModel):
     detail_content: str
     source_message_ids: list[UUID]
 
-class output_memory(BaseModel):
+
+class OutputMemory(BaseModel):
     summary_id: UUID | None
     summary_content: str
-    details: list[output_detail]
-
-def ingestion_message_converter(messages: list["Messages"]):
-    ingestion_messages = []
-    for message in messages:
-        ingestion_message = ingestion_message(id = message.id, role = message.role, content = message.content)
-        ingestion_messages.append(ingestion_message)
-
-    return ingestion_messages
-
-def last_message_finder(messages: list["Messages"]):
-    messages.sort(key = lambda x: x.order_in_chat)
-    len = len(messages)
-    last_memory_extracted_message_order = messages[len-1].order_in_chat
+    details: list[OutputDetail]
 
 
-def ingestion_message_embedding(ingestion_messages: list[ingestion_message]):
+def _messages_to_ingestion_format(messages: list[Message]) -> list[IngestionMessage]:
+    """Convert raw Message objects to IngestionMessage for the prompt."""
+    return [
+        IngestionMessage(id=m.id, role=m.role, content=m.content)
+        for m in messages
+    ]
+
+
+def _ingestion_message_embedding(ingestion_messages: list[IngestionMessage]):
     message_string = "\n".join(message.content for message in ingestion_messages)
     embedding = generate_embedding(message_string)
-
     return embedding
 
-def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message], previous_memories: list[previous_memory]):
+
+def _ingestion_prompt(
+    user_name: str,
+    ingestion_messages: list[IngestionMessage],
+    previous_memories: list,
+    previous_summary_blocks: list[dict],
+    previous_gap_messages: list[dict],
+) -> str:
     current_datetime = datetime.now()
 
     conversation_json = json.dumps(
@@ -66,6 +75,10 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
         indent=2,
     )
 
+    # Previous conversation context: blocks + gap messages (if any)
+    summary_blocks_json = json.dumps(previous_summary_blocks, ensure_ascii=False)
+    gap_messages_json = json.dumps(previous_gap_messages, ensure_ascii=False)
+
     prompt_1 = f"""
     # Memory Ingestion
 
@@ -73,9 +86,9 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
 
     You are a Memory Ingestion LLM for a personal knowledge base.
 
-    Extract durable and useful NEW knowledge about the user from the current
-    conversation. First create the Knowledge Details, then decide whether those
-    Details belong to an existing Knowledge Summary or require a new Summary.
+    Extract durable and useful NEW knowledge about the user from the Current
+    Conversation ONLY. First create the Knowledge Details, then decide whether
+    those Details belong to an existing Knowledge Summary or require a new Summary.
 
     A Summary represents a broad, persistent cluster of related knowledge.
     A Detail represents specific new knowledge and evidence from the current
@@ -85,6 +98,10 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
     for understanding the user in future conversations. Most conversations
     contain nothing worth storing — returning [] is the expected outcome far
     more often than not.
+
+    IMPORTANT: Extract knowledge ONLY from the Current Conversation. Previous
+    Conversation Summary and Gap Messages are context only — do not extract
+    knowledge from them.
 
     ---
 
@@ -99,7 +116,25 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
     Use this when interpreting relative time expressions such as "today",
     "yesterday", "last week", etc.
 
+    ### Previous Conversation Summary
+
+    {summary_blocks_json}
+
+    These are compressed summaries of earlier parts of the conversation.
+    Use them to understand the broader context and trajectory of the
+    conversation. Do not treat them as current knowledge — they are
+    background context only.
+
+    ### Gap Messages
+
+    {gap_messages_json}
+
+    These are messages that were not included in any previous summary block.
+    They provide additional context between the last summary and the current
+    conversation. Do not extract knowledge from these — they are context only.
+
     ### Current Conversation
+
     {conversation_json}
 
     Each message contains:
@@ -107,7 +142,10 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
     - role: role_enum(User, Agent, System)
     - content: message content
 
+    This is the ONLY section you should extract knowledge from.
+
     ### Previous Similar Memories
+
     {memories_json}
 
     Each memory contains:
@@ -204,119 +242,6 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
 
     ---
 
-    ## Example A — new Summary, existing Summary update, and a supersession
-
-    ### User
-    Rishi
-
-    ### Current Date-Time
-    11:39:10 AM 26th February 2026 
-
-    ### Previous Similar Memories
-
-    memories_json = [
-        {
-            "summary_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            "summary_content": "The user has been building a personal RAG-based knowledge management tool in Python with PostgreSQL and pgvector. He chose PyMuPDF for parsing, RecursiveCharacterTextSplitter for chunking, sentence-transformers plus Cohere reranking for retrieval, and was targeting a bottom-up build with explicit input/output contracts between stages.",
-            "details": [
-                "The user said he prefers building bottom-up, defining each stage's input/output contract before implementation, rather than designing the whole pipeline top-down first."
-            ]
-        }
-    ]
-
-    ### Current Conversation
-
-    conversation_json = [
-        {
-            "id": "11111111-1111-4111-8111-111111111111",
-            "role": "user",
-            "content": "Update — I dropped Cohere reranking today while coding, it wasn't worth the API cost for this project size. Going with a simpler cross-encoder reranker instead."
-        },
-        {
-            "id": "22222222-2222-4222-8222-222222222222",
-            "role": "assistant",
-            "content": "Makes sense, cross-encoders are a solid lighter-weight option."
-        },
-        {
-            "id": "33333333-3333-4333-8333-333333333333",
-            "role": "user",
-            "content": "lol yeah anyway I'm starving, gonna go grab lunch"
-        }
-    ]
-
-    ### Expected Processing
-
-    Detail 1: The user replaced Cohere reranking with a local cross-encoder
-    reranker, citing API cost relative to project size — this changes a
-    previously stated architecture decision. Source: message 1.
-
-    The "gonna go grab lunch" message is casual and temporary — it produces no
-    Detail.
-
-    Deciding placement: Detail 1 updates the existing second-brain-rag Summary,
-    and the update should show the change (Cohere → cross-encoder) rather than
-    just dropping the old fact silently.
-
-    ### Example Output
-
-    [
-        {
-            "summary_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            "summary_content": "The user has been building a personal RAG-based knowledge management tool in Python with PostgreSQL and pgvector. He chose PyMuPDF for parsing and RecursiveCharacterTextSplitter for chunking. He originally planned Cohere reranking but later replaced it with a local cross-encoder reranker due to API cost relative to the project's size. He prefers building bottom-up, defining each stage's input/output contract before implementation.",
-            "details": [
-                {
-                    "detail_content": "The user replaced Cohere reranking with a local cross-encoder reranker in his RAG pipeline, citing that the API cost wasn't justified for the project's size.",
-                    "source_message_ids": ["11111111-1111-4111-8111-111111111111"]
-                }
-            ]
-        }
-    ]
-
-    ---
-
-    ## Example B — nothing worth storing
-
-    ### User
-    Rishi
-
-    ### Current Date-Time
-    11:39:10 AM 26th February 2026
-
-    ### Previous Similar Memories
-    memories_json = []
-
-    ### Current Conversation
-
-    conversation_json = [
-        {
-            "id": "44444444-4444-4444-8444-444444444444",
-            "role": "user",
-            "content": "can you explain what a hash collision is"
-        },
-        {
-            "id": "55555555-5555-4555-8555-555555555555",
-            "role": "assistant",
-            "content": "A hash collision is when two different inputs produce the same hash output..."
-        },
-        {
-            "id": "66666666-6666-4666-8666-666666666666",
-            "role": "user",
-            "content": "ah got it, thanks"
-        }
-    ]
-
-    ### Expected Processing
-
-    This is a one-off factual question with no durable information about the
-    user — no preference, decision, event, or change is expressed. Nothing
-    qualifies as a Detail.
-
-    ### Example Output
-
-    []
-
-    ---
-
     ## Output
 
     Return ONLY a JSON list of OutputMemory objects — no explanations, reasoning,
@@ -353,45 +278,168 @@ def ingestion_prompt(user_name: str, ingestion_messages: list[ingestion_message]
     prompt = prompt_1 + prompt_2
     return prompt
 
-def response_to_pydantic(response: str):
-    adapter = TypeAdapter(list[output_memory])
+
+def _response_to_pydantic(response: str) -> list[OutputMemory]:
+    adapter = TypeAdapter(list[OutputMemory])
     memories = adapter.validate_json(response)
     return memories
 
-def db_memory_ingestion(db: Session, memories: list[output_memory], user_id: UUID, chat_id: UUID):
+
+def _db_memory_ingestion(db: Session, memories: list[OutputMemory], user_id: UUID, chat_id: UUID):
     for memory in memories:
         if memory.summary_id is None:
-            updated_memory = add_knowledge_summary(db, memory.summary_content, user_id)
+            updated_memory = create_memory_summary(db, user_id, memory.summary_content)
         else:
-            updated_memory = update_knowledge_summary(db, user_id, memory.summary_id, memory.summary_content)
+            updated_memory = update_memory_summary(db, user_id, memory.summary_id, memory.summary_content)
+
+        if updated_memory is None:
+            continue
+
         for detail in memory.details:
-            add_knowledge_detail(db, updated_memory.summary_id, chat_id, detail.source_message_ids, detail.detail_content, user_id)
+            mem_detail = create_memory_detail(
+                db, user_id, updated_memory.id, chat_id, detail.detail_content
+            )
+            if mem_detail is None:
+                continue
 
-def ingestion(db: Session, messages: list["Messages"], ingestion_user: chat_user):
+            for message_id in detail.source_message_ids:
+                create_detail_join_message(db, user_id, chat_id, mem_detail.id, message_id)
 
-    ingestion_messages = ingestion_message_converter(messages)
 
-    embedding = ingestion_message_embedding(ingestion_messages)
+def _get_block_max_order(block: MessageBlock) -> int:
+    """Get the max order_in_chat of messages linked to this block."""
+    messages = getattr(block, "message", []) or []
+    if not messages:
+        return block.order_in_chat
+    return max(m.order_in_chat for m in messages)
 
-    user_id = ingestion_user.user_id
-    chat_id = ingestion_user.chat_id
 
+def _build_ingestion_context(
+    db: Session,
+    user_id: UUID,
+    chat_id: UUID,
+    last_ingested: int,
+    ingestion_messages: list[Message],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Build previous conversation context for the ingestion prompt.
+    Uses 3-case logic based on last_summarisation_message_order vs first ingestion order.
+
+    Returns (previous_summary_blocks, gap_messages) as list[dict].
+    """
+    blocks = read_message_blocks_by_chat(db, user_id, chat_id) or []
+
+    if not ingestion_messages:
+        return [], []
+
+    first_ingestion_order = ingestion_messages[0].order_in_chat
+
+    # Format all blocks as previous context
+    previous_summary_blocks = [
+        {"order": block.order_in_chat, "summary": block.content}
+        for block in blocks
+    ]
+
+    if not blocks:
+        # No blocks yet — no gap, no previous summary
+        return previous_summary_blocks, []
+
+    # Get max message order from the last block
+    last_block_max_order = _get_block_max_order(blocks[-1])
+
+    # Read last_summarisation_message_order from chat
+    chat = read_chat(db, user_id, chat_id)
+    last_summarised = chat.last_summarisation_message_order or 0
+
+    # Three cases
+    if last_summarised + 1 == first_ingestion_order:
+        # Case a: Clean — ingestion messages start right after last summarised
+        # No gap messages needed
+        return previous_summary_blocks, []
+
+    elif last_summarised >= first_ingestion_order:
+        # Case b: Overlap — summarisation went beyond ingestion start
+        # The overlapping block provides context, no gap needed
+        return previous_summary_blocks, []
+
+    else:
+        # Case c: Gap — messages between last block and ingestion window
+        # Include gap messages as additional context
+        gap_messages_raw = read_messages_after_order(db, chat_id, last_block_max_order)
+        ingestion_ids = {m.id for m in ingestion_messages}
+        gap_messages_raw = [m for m in gap_messages_raw if m.id not in ingestion_ids]
+
+        gap_messages = [
+            {
+                "order": m.order_in_chat,
+                "role": m.role.value if hasattr(m.role, "value") else str(m.role),
+                "content": m.content,
+            }
+            for m in gap_messages_raw
+        ]
+
+        return previous_summary_blocks, gap_messages
+
+
+def ingestion(db: Session, user_id: UUID, chat_id: UUID) -> None:
+    """
+    Extract durable memories from messages.
+    Loads its own context from DB. Returns None (stateless).
+
+    1. Sanity check: chat.ingestion_going_on
+    2. Load messages after last_ingestion_message_order
+    3. Build prompt with 3-case block logic
+    4. LLM call
+    5. Persist memories
+    6. Update last_ingestion_message_order
+    """
+    # Sanity check
+    chat = read_chat(db, user_id, chat_id)
+    if chat is None:
+        return
+    if chat.ingestion_going_on:
+        return
+
+    last_ingested = chat.last_ingestion_message_order or 0
+
+    # Load messages to ingest
+    ingestion_messages = read_messages_after_order(db, chat_id, last_ingested)
+    if not ingestion_messages:
+        return
+
+    # Build context with 3-case block logic
+    previous_summary_blocks, gap_messages = _build_ingestion_context(
+        db, user_id, chat_id, last_ingested, ingestion_messages
+    )
+
+    # Convert to ingestion format
+    ingestion_format = _messages_to_ingestion_format(ingestion_messages)
+
+    # Embedding for similarity search
+    embedding = _ingestion_message_embedding(ingestion_format)
+
+    # Retrieve previous similar memories
     summary_limit = 5
-    detail_limit = 5    
-
+    detail_limit = 5
     previous_memories = retrieve_memory(db, user_id, embedding, summary_limit, detail_limit)
 
-    user = get_user(db, user_id)
-    user_name = user.name
+    # Get user name
+    user = read_user(db, user_id)
+    user_name = user.name if user else "User"
 
-    prompt = ingestion_prompt(user_name, ingestion_messages, previous_memories)
+    # Build prompt
+    prompt = _ingestion_prompt(
+        user_name, ingestion_format, previous_memories,
+        previous_summary_blocks, gap_messages,
+    )
 
+    # LLM call
     response = chat_gemini(prompt)
 
-    memories = response_to_pydantic(response)
+    # Parse + persist
+    memories = _response_to_pydantic(response)
+    _db_memory_ingestion(db, memories, user_id, chat_id)
 
-    db_memory_ingestion(db, memories, user_id, chat_id)
-
-    last_memory_extracted_message_order = last_message_finder(messages)
-
-    update_chat(db, last_memory_extracted_message_order):
+    # Update last ingestion order
+    last_order = max(m.order_in_chat for m in ingestion_messages)
+    update_chat(db, user_id, chat_id, last_ingestion_message_order=last_order)
