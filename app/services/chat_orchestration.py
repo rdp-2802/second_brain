@@ -11,6 +11,7 @@ from app.database.crud.retrieved_summary import create_retrieved_summary
 from app.database.crud.retrieved_detail import create_retrieved_detail
 from app.database.crud.memory_summary import update_memory_summary_retrieval_metadata
 from app.services.semantic_retrieval import semantic_retrieval, RetrievedMemory
+from google.genai.errors import ClientError
 
 try:
     from app.models.llm import chat_gemini
@@ -467,7 +468,7 @@ def handle_chat_turn(
     query: str,
     summarisation_threshold: int = 30,
     ingestion_threshold: int = 20,
-) -> str:
+) -> str | None:
     """
     Stateless turn handler - called per FastAPI request.
 
@@ -511,19 +512,37 @@ def handle_chat_turn(
     j_summary, j_recent, j_prev_mem, j_curr_mem = _llm_json_creation(
         summary_blocks, recent_messages, previous_memories, current_retrieved
     )
+    print(f"Current Summary (Test): {j_summary}")
+    print(f"Current Memories (Test): {j_curr_mem}")
+    print(f"Previous Memories (Test): {j_prev_mem}")
     prompt = _llm_prompt_creation(j_summary, j_recent, j_prev_mem, j_curr_mem, query)
 
     # 8. LLM
-    llm_response = chat_gemini(prompt)
+    llm_response = ""
+    try:
+        llm_response = chat_gemini(prompt)
+        print("# ---------------------------------------------------------------------------")
+        print(f"LLM RESPONSE: {llm_response}")
+        print("# ---------------------------------------------------------------------------")
+    except ClientError as error:
+        print(f"Generation Error: {error}")
+    else:
+        # 9. Persist assistant message
+        _persist_assistant_message(db, chat_user, llm_response)
 
-    # 9. Persist assistant message
-    _persist_assistant_message(db, chat_user, llm_response)
 
     # 10. Post-injection maintenance
     if _should_summarise(db, chat_user, threshold=summarisation_threshold):
         send_for_summarisation(db, chat_user, threshold=summarisation_threshold)
+        print("# ---------------------------------------------------------------------------")
+        print("Summarisation Done (Test)")
 
     if _should_ingest(db, chat_user, threshold=ingestion_threshold):
         send_for_ingestion(db, chat_user, threshold=ingestion_threshold)
+        print("# ---------------------------------------------------------------------------")
+        print("Ingestion Done (Test)")
 
-    return llm_response
+    if type(llm_response) is str:
+        return llm_response
+    elif type(llm_response) is ClientError:
+        return None

@@ -49,15 +49,15 @@ def read_chat(db: Session, user_id: UUID, chat_id: UUID):
     return chat
 
 def delete_chat(db: Session, user_id: UUID, chat_id: UUID):
-   
     chat = read_chat(db, user_id, chat_id)
 
-    if chat is None: 
-      return None
+    if chat is None:
+        return None
 
-    db.delete(chat)
+    # Use raw SQL so DB-level CASCADE handles children without ORM nullify issues
+    from sqlalchemy import text as _text
+    db.execute(_text("DELETE FROM chat WHERE id = :cid"), {"cid": str(chat_id)})
     db.commit()
-
     return chat
 
 def update_chat(

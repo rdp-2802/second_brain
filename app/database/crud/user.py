@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.database.model import User
 from uuid import UUID
+from sqlalchemy import text as _text
 
 # class User(Base):
 #     __tablename__ = "user"
@@ -56,8 +57,13 @@ def delete_user(db: Session, id: UUID):
     user = read_user(db, id)
     if user is None:
         return None
-    else:
-        db.delete(user)
-        db.commit()
-        return user
+    # Use raw SQL so DB-level CASCADE handles children without ORM nullify issues
+    db.execute(_text("DELETE FROM \"user\" WHERE id = :uid"), {"uid": str(id)})
+    db.commit()
+    return user
 
+def delete_all_users(db: Session):
+    statement = "TRUNCATE TABLE \"user\" CASCADE"
+    db.execute(_text(statement))
+    db.commit()
+    

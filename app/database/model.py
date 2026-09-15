@@ -68,7 +68,7 @@ class Chat(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(Text, default="New Chat")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_summarisation_message_order: Mapped[int] = mapped_column(Integer, default = 0)
     last_ingestion_message_order: Mapped[int] = mapped_column(Integer, default = 0)
     summarisation_going_on: Mapped[bool] = mapped_column(Boolean, default = False, nullable = False)

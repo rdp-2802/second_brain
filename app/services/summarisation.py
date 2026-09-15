@@ -227,8 +227,6 @@ def summariser(db: Session, user_id: UUID, chat_id: UUID) -> None:
     chat = read_chat(db, user_id, chat_id)
     if chat is None:
         return
-    if chat.summarisation_going_on:
-        return
 
     last_summarised = chat.last_summarisation_message_order or 0
 
@@ -255,6 +253,8 @@ def summariser(db: Session, user_id: UUID, chat_id: UUID) -> None:
 
     # LLM call
     summary_text = chat_gemini(prompt)
+    print(f"Summary created: {summary_text}")
+    print("# ---------------------------------------------------------------------------")
 
     # Create MessageBlock
     block = create_message_block(db, user_id, chat_id, content=summary_text)

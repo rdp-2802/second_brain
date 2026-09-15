@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database.model import MemorySummary, MemoryDetail
 from app.database.crud.memory_summary import read_memory_summaries_by_similarity
-from app.database.crud.memory_detail import read_memory_details_by_summary
+from app.database.crud.memory_detail import read_memory_details_by_similarity, read_memory_details_by_summary
 
 try:
     from app.models.embedding import generate_embedding

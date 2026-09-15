@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from google import genai
+from google.genai.errors import ClientError
 
 load_dotenv()
 
@@ -11,13 +12,13 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.5-flash-lite"
 
 
 def chat_gemini(content: str) -> str:
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=content,
-    )
-
-    return response.text
+    chat = client.chats.create(model = MODEL)
+    try:
+        response = chat.send_message(content)
+        return response.text
+    except ClientError as error:
+        raise

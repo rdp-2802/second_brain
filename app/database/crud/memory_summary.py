@@ -8,7 +8,6 @@ from app.database.crud.user import read_user
 
 from app.database.model import MemorySummary
 
-#relevancy score is set to be 0 right now. both while adding and updating a summary. we will develop a useful algorithm in v2 or v3 for calculating and using relevancy score
 
 def create_memory_summary(
     db: Session,
