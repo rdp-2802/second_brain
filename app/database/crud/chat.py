@@ -23,13 +23,21 @@ from uuid import UUID
 #     retrieved_summary: Mapped[List["RetrievedSummary"]] = relationship(back_populates="chat")
 #     retrieved_detail: Mapped[List["RetrievedDetail"]] = relationship(back_populates="chat")
 
-def create_chat(db: Session, user_id : UUID):
+def create_chat(db: Session, user_id : UUID, title: str | None = None):
     user = read_user(db, user_id)
 
     if user is None:
         return None
 
-    chat = Chat(user_id = user_id)
+    if title is not None:
+        title = title.strip()
+        if not title:
+            title = None
+
+    if title is not None:
+        chat = Chat(user_id = user_id, title = title)
+    else:
+        chat = Chat(user_id = user_id)
 
     db.add(chat)
     db.commit()
@@ -47,6 +55,22 @@ def read_chat(db: Session, user_id: UUID, chat_id: UUID):
     chat = db.execute(statement).scalar_one_or_none()
 
     return chat
+
+def read_chats(db: Session, user_id: UUID) -> list[Chat]:
+    user = read_user(db, user_id)
+
+    if user is None:
+        return []
+
+    statement = (
+        select(Chat)
+        .where(Chat.user_id == user_id)
+        .order_by(Chat.last_message_at.desc().nulls_last(), Chat.created_at.desc())
+    )
+    chats = db.execute(statement).scalars().all()
+
+    return list(chats)
+
 
 def delete_chat(db: Session, user_id: UUID, chat_id: UUID):
     chat = read_chat(db, user_id, chat_id)

@@ -454,6 +454,44 @@ def send_for_ingestion(
         update_chat(db, chat_user.user_id, chat_user.chat_id, ingestion_going_on=False)
 
 
+def _generate_title_for_query(query: str) -> str | None:
+    """LLM-generated concise title for the first turn. Returns None on failure."""
+    q = query.strip()
+    if not q:
+        return None
+    prompt = (
+        "Generate a concise chat title (3-6 words, max 40 characters) for the following "
+        "user query. Respond with ONLY the title text, no quotes, no bullet points, Title Case.\n\n"
+        f"Query: {q}\n\nTitle:"
+    )
+    try:
+        raw = chat_gemini(prompt)
+        if raw:
+            title = raw.strip().strip('"').strip("'").strip("`").strip()
+            title = title.split("\n")[0].strip().rstrip(".").strip()
+            if 3 <= len(title) <= 60:
+                if len(title) > 50:
+                    title = title[:50].strip()
+                return title
+    except Exception as error:
+        print(f"Title generation error: {error}")
+    return None
+
+
+def _fallback_title(query: str) -> str:
+    q = query.strip()
+    words = q.split()
+    candidate = " ".join(words[:6])
+    if len(candidate) > 40:
+        candidate = candidate[:40].strip()
+        if " " in candidate:
+            candidate = candidate.rsplit(" ", 1)[0]
+    candidate = candidate.strip()
+    if not candidate:
+        return "New Chat"
+    return candidate
+
+
 def handle_chat_close(db: Session, chat_user: ChatUser):
     """
     Called when user closes chat - force ingestion of all remaining messages.
@@ -468,7 +506,7 @@ def handle_chat_turn(
     query: str,
     summarisation_threshold: int = 30,
     ingestion_threshold: int = 20,
-) -> str | None:
+) -> Message | None:
     """
     Stateless turn handler - called per FastAPI request.
 
@@ -482,13 +520,21 @@ def handle_chat_turn(
     7) Build prompt with 4 sections: summary, messages, previous memories, current memories
     8) LLM
     9) Persist assistant message
+    9a) Auto-title on first turn (no old messages & title is still "New Chat")
     10) Post-injection: _should_summarise / _should_ingest
+
+    Returns the persisted assistant Message on success, None on LLM failure.
+    When this is the first turn and the main LLM succeeded, the chat title is
+    auto-generated from the query and persisted via update_chat.
     """
     # 1. Form context
     summary_blocks, recent_messages, raw_messages = _form_chat_context(db, chat_user)
 
     # 2. Extract previous memories from recent messages (deduplicated)
     previous_memories = _extract_recent_memories(raw_messages)
+
+    # Capture first-turn flag before we persist anything — used in 9a.
+    is_first_turn = not raw_messages and not summary_blocks
 
     # 3. Persist user message (needed for audit trail)
     user_msg = _persist_user_message(db, chat_user, query)
@@ -517,21 +563,44 @@ def handle_chat_turn(
     print(f"Previous Memories (Test): {j_prev_mem}")
     prompt = _llm_prompt_creation(j_summary, j_recent, j_prev_mem, j_curr_mem, query)
 
-    # 8. LLM
-    llm_response = ""
+    # 8. LLM — atomic: on failure the just-persisted user message
+    # (and its retrieval-audit rows via DB CASCADE) must not remain.
     try:
         llm_response = chat_gemini(prompt)
         print("# ---------------------------------------------------------------------------")
         print(f"LLM RESPONSE: {llm_response}")
         print("# ---------------------------------------------------------------------------")
-    except ClientError as error:
+    except Exception as error:
         print(f"Generation Error: {error}")
-    else:
-        # 9. Persist assistant message
-        _persist_assistant_message(db, chat_user, llm_response)
+        try:
+            db.delete(user_msg)
+            db.commit()
+        except Exception as cleanup_error:
+            print(f"Rollback Error: {cleanup_error}")
+            db.rollback()
+        return None
 
+    # 9. Persist assistant message — capture the Message object
+    #    so the API can return it directly without reloading the chat.
+    assistant_msg = _persist_assistant_message(db, chat_user, llm_response)
 
-    # 10. Post-injection maintenance
+    # 9a. Auto-title on first turn — only after LLM success, so a failed turn
+    #     does not leave a titled empty chat. Runs after assistant persist to keep atomicity.
+    if is_first_turn:
+        chat_for_title = read_chat(db, chat_user.user_id, chat_user.chat_id)
+        if chat_for_title is not None:
+            current_title = (chat_for_title.title or "").strip()
+            if not current_title or current_title == "New Chat":
+                generated = _generate_title_for_query(query)
+                if not generated:
+                    generated = _fallback_title(query)
+                if generated:
+                    try:
+                        update_chat(db, chat_user.user_id, chat_user.chat_id, title=generated)
+                    except Exception as error:
+                        print(f"Auto-title update error: {error}")
+
+    # 10. Post-injection maintenance (only on LLM success)
     if _should_summarise(db, chat_user, threshold=summarisation_threshold):
         send_for_summarisation(db, chat_user, threshold=summarisation_threshold)
         print("# ---------------------------------------------------------------------------")
@@ -542,7 +611,4 @@ def handle_chat_turn(
         print("# ---------------------------------------------------------------------------")
         print("Ingestion Done (Test)")
 
-    if type(llm_response) is str:
-        return llm_response
-    elif type(llm_response) is ClientError:
-        return None
+    return assistant_msg

@@ -1,8 +1,9 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.database.model import User
+from app.database.model import User, SessionLocal, get_db
 from uuid import UUID
 from sqlalchemy import text as _text
+from app.auth.pass_util import hash_password
 
 # class User(Base):
 #     __tablename__ = "user"
@@ -19,8 +20,9 @@ from sqlalchemy import text as _text
 #     retrieved_summary: Mapped[List["RetrievedSummary"]] = relationship(back_populates="user")
 #     retrieved_detail: Mapped[List["RetrievedDetail"]] = relationship(back_populates="user")
 
-def create_user(db: Session, name: str, email: str, mobile_no: int):
-    user = User(name = name, email = email, mobile_no = mobile_no)
+def create_user(db: Session, name: str, email: str, mobile_no: int, password: str):
+    hashed_password = hash_password(password)
+    user = User(name = name, email = email, mobile_no = mobile_no, password = hashed_password)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -29,6 +31,18 @@ def create_user(db: Session, name: str, email: str, mobile_no: int):
 
 def read_user(db: Session, id: UUID):
     statement = select(User).where(User.id == id)
+    user = db.execute(statement).scalar_one_or_none()
+
+    return user
+
+def read_user_by_email(db: Session, email: str) -> User:
+    statement = select(User).where(User.email == email)
+    user = db.execute(statement).scalar_one_or_none()
+
+    return user
+
+def read_user_by_mobile_no(db: Session, mobile_no: str) -> User:
+    statement = select(User).where(User.mobile_no == mobile_no)
     user = db.execute(statement).scalar_one_or_none()
 
     return user
@@ -66,4 +80,3 @@ def delete_all_users(db: Session):
     statement = "TRUNCATE TABLE \"user\" CASCADE"
     db.execute(_text(statement))
     db.commit()
-    

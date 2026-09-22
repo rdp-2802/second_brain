@@ -27,7 +27,7 @@ try :
         if query == "exit":
             print("Meet you again !")
             break
-        handle_chat_turn(db, chat_user, query, summarisation_threshold = 20, ingestion_threshold = 20,)
+        handle_chat_turn(db, chat_user, query, summarisation_threshold = 2, ingestion_threshold = 2,)
 
     delete_user(db, user.id)
 finally:

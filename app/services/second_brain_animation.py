@@ -329,4 +329,3 @@ def start_second_brain():
 
 # ---------- Application Entry Point ----------
 
-start_second_brain()

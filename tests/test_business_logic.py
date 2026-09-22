@@ -131,6 +131,9 @@ def safe_handle_turn(db, chat_user, query, **kw) -> str | None:
     for attempt in range(1, max_retries + 2):
         try:
             resp = handle_chat_turn(db, chat_user, query, **kw)
+            # Orchestration now returns Message | None; unwrap to str for legacy callers.
+            if resp is not None and not isinstance(resp, str):
+                resp = getattr(resp, "content", None)
             db.expire_all()
             if attempt == 1 and throttle:
                 time.sleep(throttle)

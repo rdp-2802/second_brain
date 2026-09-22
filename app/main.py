@@ -1,16 +1,17 @@
 from fastapi import FastAPI
+from fastapi import APIRouter
 from pydantic import BaseModel
+
+from app.api.auth import auth_router
+from app.api.chat import chat_router
 
 app = FastAPI()
 
-class user_text(BaseModel):
-    id: int
-    text: str
+app.include_router(auth_router, prefix="/auth")
+app.include_router(chat_router, prefix="/chat")
+
 
 @app.get('/')
 def home():
     return {"message":"bhai ki pehli fast api"}
 
-@app.post('/addtext')
-def input_text(text: user_text):
-    return {"id":text.id, "text":text.text}
