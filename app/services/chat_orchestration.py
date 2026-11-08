@@ -504,8 +504,8 @@ def handle_chat_turn(
     db: Session,
     chat_user: ChatUser,
     query: str,
-    summarisation_threshold: int = 30,
-    ingestion_threshold: int = 20,
+    summarisation_threshold: int = 2,
+    ingestion_threshold: int = 2,
 ) -> Message | None:
     """
     Stateless turn handler - called per FastAPI request.

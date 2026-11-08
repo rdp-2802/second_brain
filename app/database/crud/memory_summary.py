@@ -6,8 +6,10 @@ from sqlalchemy import select
 from app.models.embedding import generate_embedding
 from app.database.crud.user import read_user
 
-from app.database.model import MemorySummary
+from app.database.model import MemorySummary, SessionLocal
 
+
+db = SessionLocal()
 
 def create_memory_summary(
     db: Session,
@@ -55,6 +57,17 @@ def read_memory_summaries(
     statement = (
         select(MemorySummary)
         .where(MemorySummary.user_id == user_id)
+    )
+
+    memory_summaries = db.execute(statement).scalars().all()
+
+    return memory_summaries
+
+def read_all_memory_summaries(
+    db: Session,
+):
+    statement = (
+        select(MemorySummary)
     )
 
     memory_summaries = db.execute(statement).scalars().all()
@@ -145,3 +158,11 @@ def update_memory_summary_retrieval_metadata(
     db.refresh(memory_summary)
 
     return memory_summary
+
+# memories = read_all_memory_summaries(db)
+# for memory in memories:
+#     print("ID:", memory.id)
+#     print("User ID:", memory.user_id)
+#     print("Summary:", memory.content)
+#     print("Created At:", memory.created_at)
+#     print()

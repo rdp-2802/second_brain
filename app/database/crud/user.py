@@ -80,3 +80,7 @@ def delete_all_users(db: Session):
     statement = "TRUNCATE TABLE \"user\" CASCADE"
     db.execute(_text(statement))
     db.commit()
+
+
+# db = SessionLocal()
+delete_all_users(db)

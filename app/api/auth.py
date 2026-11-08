@@ -46,7 +46,7 @@ def api_login(details: LoginRequest, response: Response, db: Session = Depends(g
         key="session_id",
         value=session.id,
         httponly=True,
-        #secure=True,
+        secure=True,
         samesite="lax",
         max_age=int(SESSION_DURATION.total_seconds()),
     )
